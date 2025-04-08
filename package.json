@@ -1,0 +1,27 @@
+{
+  "name": "aws-sdk-demo",
+  "version": "1.0.0",
+  "main": "dist/provision-aurora.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/provision-aurora.js",
+    "cleanup": "node dist/cleanup.js",
+    "dev": "ts-node src/provision-aurora.ts",
+    "cleanup:dev": "ts-node src/cleanup.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Aurora Serverless V2 provisioning script",
+  "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.782.0",
+    "@aws-sdk/client-ec2": "^3.0.0",
+    "@aws-sdk/client-rds": "^3.0.0",
+    "dotenv": "^16.0.0",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.0.0"
+  }
+}
