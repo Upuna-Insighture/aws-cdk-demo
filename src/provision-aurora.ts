@@ -1,5 +1,5 @@
 import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable } from '@aws-sdk/client-rds';
-import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,18 +22,74 @@ const config: AuroraConfig = {
 const rdsClient = new RDSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'us-east-1' });
 
+async function createVpc(): Promise<string> {
+  try {
+    const createVpcCommand = new CreateVpcCommand({
+      CidrBlock: '10.0.0.0/16',
+      TagSpecifications: [{
+        ResourceType: 'vpc',
+        Tags: [{ Key: 'Name', Value: 'aurora-serverless-vpc' }]
+      }]
+    });
+    const vpcResponse = await ec2Client.send(createVpcCommand);
+    const vpcId = vpcResponse.Vpc?.VpcId;
+    if (!vpcId) throw new Error('Failed to create VPC');
+
+    const createSubnetCommand = new CreateSubnetCommand({
+      VpcId: vpcId,
+      CidrBlock: '10.0.1.0/24',
+      AvailabilityZone: `${process.env.AWS_REGION || 'us-east-1'}a`
+    });
+    const subnetResponse = await ec2Client.send(createSubnetCommand);
+    const subnetId = subnetResponse.Subnet?.SubnetId;
+    if (!subnetId) throw new Error('Failed to create subnet');
+
+    const createIgwCommand = new CreateInternetGatewayCommand({});
+    const igwResponse = await ec2Client.send(createIgwCommand);
+    const igwId = igwResponse.InternetGateway?.InternetGatewayId;
+    if (!igwId) throw new Error('Failed to create internet gateway');
+
+    await ec2Client.send(new AttachInternetGatewayCommand({
+      VpcId: vpcId,
+      InternetGatewayId: igwId
+    }));
+
+    const createRouteTableCommand = new CreateRouteTableCommand({ VpcId: vpcId });
+    const routeTableResponse = await ec2Client.send(createRouteTableCommand);
+    const routeTableId = routeTableResponse.RouteTable?.RouteTableId;
+    if (!routeTableId) throw new Error('Failed to create route table');
+
+    await ec2Client.send(new CreateRouteCommand({
+      RouteTableId: routeTableId,
+      DestinationCidrBlock: '0.0.0.0/0',
+      GatewayId: igwId
+    }));
+
+    await ec2Client.send(new AssociateRouteTableCommand({
+      SubnetId: subnetId,
+      RouteTableId: routeTableId
+    }));
+
+    return vpcId;
+  } catch (error) {
+    console.error('Error creating VPC:', error);
+    throw error;
+  }
+}
+
 async function getDefaultVpcId(): Promise<string> {
   try {
     const describeVpcsCommand = new DescribeVpcsCommand({
       Filters: [{ Name: 'isDefault', Values: ['true'] }]
     });
     const response = await ec2Client.send(describeVpcsCommand);
-    if (!response.Vpcs?.[0]?.VpcId) {
-      throw new Error('No default VPC found');
+    if (response.Vpcs?.[0]?.VpcId) {
+      return response.Vpcs[0].VpcId;
     }
-    return response.Vpcs[0].VpcId;
+    console.log('No default VPC found, creating a new one...');
+    return await createVpc();
   } catch (error) {
-    console.error('Error getting default VPC:', error);
+    console.error('Error getting/creating VPC:', error);
     throw error;
   }
 }
