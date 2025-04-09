@@ -1,5 +1,5 @@
 import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable } from '@aws-sdk/client-rds';
-import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,11 +22,29 @@ const config: AuroraConfig = {
 const rdsClient = new RDSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'us-east-1' });
 
+async function getDefaultVpcId(): Promise<string> {
+  try {
+    const describeVpcsCommand = new DescribeVpcsCommand({
+      Filters: [{ Name: 'isDefault', Values: ['true'] }]
+    });
+    const response = await ec2Client.send(describeVpcsCommand);
+    if (!response.Vpcs?.[0]?.VpcId) {
+      throw new Error('No default VPC found');
+    }
+    return response.Vpcs[0].VpcId;
+  } catch (error) {
+    console.error('Error getting default VPC:', error);
+    throw error;
+  }
+}
+
 async function createSecurityGroup(): Promise<string> {
   try {
+    const vpcId = await getDefaultVpcId();
     const createSgCommand = new CreateSecurityGroupCommand({
       GroupName: 'aurora-serverless-sg',
       Description: 'Security group for Aurora Serverless V2',
+      VpcId: vpcId
     });
     const createSgResponse = await ec2Client.send(createSgCommand);
     
