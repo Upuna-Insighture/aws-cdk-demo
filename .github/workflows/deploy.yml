@@ -13,6 +13,10 @@ env:
   DB_NAME: auroradb
   AWS_ROLE_ARN: arn:aws:iam::559050241106:role/github-actions-deploy-role
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -32,7 +36,7 @@ jobs:
       run: npm ci
 
     - name: Configure AWS Credentials for Deployment
-      uses: aws-actions/configure-aws-credentials@v1
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         audience: sts.amazonaws.com
         aws-region: ${{ env.AWS_REGION }}
