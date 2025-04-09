@@ -130,7 +130,7 @@ async function createAuroraCluster(securityGroupId: string): Promise<string> {
       DBClusterIdentifier: config.clusterIdentifier,
       Engine: 'aurora-postgresql',
       EngineMode: 'provisioned',
-      EngineVersion: '14.7',
+      EngineVersion: '15.3',
       DatabaseName: config.databaseName,
       MasterUsername: config.masterUsername,
       MasterUserPassword: config.masterUserPassword,
