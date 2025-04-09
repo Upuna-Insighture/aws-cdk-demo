@@ -31,12 +31,12 @@ jobs:
     - name: Install dependencies
       run: npm ci
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v2
+    - name: Configure AWS Credentials for China region audience
+      uses: aws-actions/configure-aws-credentials@v4
       with:
-        role-to-assume: ${{ env.AWS_ROLE_ARN }}
+        audience: sts.amazonaws.com.cn
         aws-region: ${{ env.AWS_REGION }}
-        role-session-name: GitHubActionsSession
+        role-to-assume: arn:aws:iam::559050241106:role/github-actions-deploy-role
 
     - name: Create .env file
       run: |
