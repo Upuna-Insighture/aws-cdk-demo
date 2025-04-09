@@ -11,7 +11,7 @@ env:
   DB_MASTER_USERNAME: admin
   DB_MASTER_PASSWORD: admin@123
   DB_NAME: auroradb
-  AWS_ROLE_ARN: arn:aws:iam::559050241106:role/github-actions-deploy-role
+  AWS_ROLE_ARN: arn:aws:sts::559050241106:assumed-role/github-actions-deploy-role/upuna.keerawella@insighture.com
 
 jobs:
   deploy:
