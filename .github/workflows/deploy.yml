@@ -9,12 +9,15 @@ env:
   AWS_REGION: us-east-1
   DB_CLUSTER_IDENTIFIER: aurora-serverless-demo
   DB_MASTER_USERNAME: admin
+  DB_MASTER_PASSWORD: admin@123
   DB_NAME: auroradb
   AWS_ROLE_ARN: arn:aws:sts::559050241106:assumed-role/AWSReservedSSO_INS-RnD-Dev-Access_ab7f979b17ebf2f9/upuna.keerawella@insighture.com
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    outputs:
+      security_group_id: ${{ steps.store-sg.outputs.security_group_id }}
     
     steps:
     - uses: actions/checkout@v3
@@ -39,7 +42,7 @@ jobs:
         echo "AWS_REGION=${{ env.AWS_REGION }}" > .env
         echo "DB_CLUSTER_IDENTIFIER=${{ env.DB_CLUSTER_IDENTIFIER }}" >> .env
         echo "DB_MASTER_USERNAME=${{ env.DB_MASTER_USERNAME }}" >> .env
-        echo "DB_MASTER_PASSWORD=${{ secrets.DB_MASTER_PASSWORD }}" >> .env
+        echo "DB_MASTER_PASSWORD=${{ env.DB_MASTER_PASSWORD }}" >> .env
         echo "DB_NAME=${{ env.DB_NAME }}" >> .env
 
     - name: Build TypeScript
@@ -54,8 +57,7 @@ jobs:
       id: store-sg
       run: |
         SECURITY_GROUP_ID=$(grep "security group ID" output.log | awk '{print $NF}')
-        echo "SECURITY_GROUP_ID=$SECURITY_GROUP_ID" >> $GITHUB_ENV
-        echo "::set-output name=security_group_id::$SECURITY_GROUP_ID"
+        echo "security_group_id=$SECURITY_GROUP_ID" >> $GITHUB_OUTPUT
 
     - name: Upload Deployment Logs
       uses: actions/upload-artifact@v3
@@ -91,6 +93,6 @@ jobs:
 
     - name: Cleanup Resources
       if: ${{ failure() }}
-      run: npm run cleanup ${{ env.SECURITY_GROUP_ID }}
+      run: npm run cleanup ${{ needs.deploy.outputs.security_group_id }}
       env:
         AWS_REGION: ${{ env.AWS_REGION }} 
