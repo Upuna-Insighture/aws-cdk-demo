@@ -11,7 +11,7 @@ env:
   DB_MASTER_USERNAME: admin
   DB_MASTER_PASSWORD: admin@123
   DB_NAME: auroradb
-  AWS_ROLE_ARN: arn:aws:iam::559050241106:role/github-actions-deploy-role
+  AWS_ROLE_ARN: arn:aws:iam::559050241106:role/github-assumerole-dh-dev-backend
 
 jobs:
   deploy:
@@ -36,7 +36,7 @@ jobs:
       with:
         audience: sts.amazonaws.com
         aws-region: ${{ env.AWS_REGION }}
-        role-to-assume: arn:aws:iam::559050241106:role/github-actions-deploy-role
+        role-to-assume: arn:aws:iam::559050241106:role/github-assumerole-dh-dev-backend
 
     - name: Create .env file
       run: |
