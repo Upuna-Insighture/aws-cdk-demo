@@ -6,7 +6,14 @@ if (process.argv.length < 3) {
 }
 
 const securityGroupId = process.argv[2];
-cleanupResources(securityGroupId)
+// Create a SecurityGroupResult object with the provided security group ID
+// Note: The vpcId is not needed for cleanup
+const securityGroupResult = {
+  groupId: securityGroupId,
+  vpcId: '' // Empty string since it's not used in cleanup
+};
+
+cleanupResources(securityGroupResult)
   .then(() => console.log('Cleanup completed successfully'))
   .catch((error) => {
     console.error('Cleanup failed:', error);
