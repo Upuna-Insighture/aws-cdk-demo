@@ -8,8 +8,8 @@ on:
 env:
   AWS_REGION: us-east-1
   DB_CLUSTER_IDENTIFIER: aurora-serverless-demo
-  DB_MASTER_USERNAME: admin
-  DB_MASTER_PASSWORD: admin@123
+  DB_MASTER_USERNAME: upunaDBMaster
+  DB_MASTER_PASSWORD: MasKpaf@123
   DB_NAME: auroradb
   AWS_ROLE_ARN: arn:aws:iam::559050241106:role/github-actions-deploy-role
 
