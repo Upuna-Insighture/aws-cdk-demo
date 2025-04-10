@@ -213,7 +213,6 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
         MaxCapacity: 1,
       },
       StorageType: 'aurora',
-      AllocatedStorage: 10,
     });
 
     const createClusterResponse = await rdsClient.send(createClusterCommand);
