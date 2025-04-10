@@ -159,45 +159,44 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
       ]
     });
     const subnetsResponse = await ec2Client.send(describeSubnetsCommand);
-    const subnetIds = subnetsResponse.Subnets?.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined) || [];
+    const subnets = subnetsResponse.Subnets || [];
     
-    if (subnetIds.length < 2) {
-      throw new Error('At least two subnets are required for RDS');
+    // Verify AZ coverage
+    const azs = new Set(subnets.map(subnet => subnet.AvailabilityZone));
+    if (azs.size < 2) {
+      throw new Error('Subnets must be in at least 2 different availability zones');
     }
 
+    const subnetIds = subnets.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined);
+    
     // Check if subnet group exists
     try {
       const describeSubnetGroupCommand = new DescribeDBSubnetGroupsCommand({
         DBSubnetGroupName: 'aurora-subnet-group'
       });
-      const existingSubnetGroup = await rdsClient.send(describeSubnetGroupCommand);
+      await rdsClient.send(describeSubnetGroupCommand);
       
-      // Delete existing subnet group if it doesn't have enough AZ coverage
-      const subnetCount = existingSubnetGroup.DBSubnetGroups?.[0]?.Subnets?.length ?? 0;
-      if (subnetCount < 2) {
-        console.log('Existing subnet group doesn\'t have enough AZ coverage, deleting it...');
-        const deleteSubnetGroupCommand = new DeleteDBSubnetGroupCommand({
-          DBSubnetGroupName: 'aurora-subnet-group'
-        });
-        await rdsClient.send(deleteSubnetGroupCommand);
-        throw new Error('Subnet group deleted due to insufficient AZ coverage');
-      }
-      console.log('DB subnet group already exists and has sufficient AZ coverage, reusing it...');
+      // Delete existing subnet group to ensure proper AZ coverage
+      console.log('Deleting existing subnet group to ensure proper AZ coverage...');
+      const deleteSubnetGroupCommand = new DeleteDBSubnetGroupCommand({
+        DBSubnetGroupName: 'aurora-subnet-group'
+      });
+      await rdsClient.send(deleteSubnetGroupCommand);
     } catch (error) {
-      if (error instanceof Error && (error.name === 'DBSubnetGroupNotFoundFault' || error.message === 'Subnet group deleted due to insufficient AZ coverage')) {
-        // Create DB subnet group if it doesn't exist or was deleted
-        const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
-          DBSubnetGroupName: 'aurora-subnet-group',
-          DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
-          SubnetIds: subnetIds,
-        });
-        await rdsClient.send(createSubnetGroupCommand);
-        subnetGroupCreated = true;
-        console.log('Created new DB subnet group with proper AZ coverage');
-      } else {
+      if (!(error instanceof Error && error.name === 'DBSubnetGroupNotFoundFault')) {
         throw error;
       }
     }
+
+    // Create new subnet group with proper AZ coverage
+    console.log('Creating new DB subnet group with proper AZ coverage...');
+    const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
+      DBSubnetGroupName: 'aurora-subnet-group',
+      DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
+      SubnetIds: subnetIds,
+    });
+    await rdsClient.send(createSubnetGroupCommand);
+    subnetGroupCreated = true;
 
     const createClusterCommand = new CreateDBClusterCommand({
       DBClusterIdentifier: config.clusterIdentifier,
