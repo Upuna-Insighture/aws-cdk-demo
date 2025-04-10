@@ -1,4 +1,4 @@
-import { cleanupResources } from './provision-aurora';
+import { cleanupResources, ResourceTracker } from './provision-aurora';
 
 if (process.argv.length < 3) {
   console.error('Please provide the security group ID as an argument');
@@ -6,14 +6,18 @@ if (process.argv.length < 3) {
 }
 
 const securityGroupId = process.argv[2];
-// Create a SecurityGroupResult object with the provided security group ID
-// Note: The vpcId is not needed for cleanup
 const securityGroupResult = {
   groupId: securityGroupId,
-  vpcId: '' // Empty string since it's not used in cleanup
+  vpcId: ''
 };
 
-cleanupResources(securityGroupResult)
+const resources: ResourceTracker = {
+  subnetIds: [],
+  subnetGroupCreated: true,
+  clusterCreated: true
+};
+
+cleanupResources(resources, securityGroupResult)
   .then(() => console.log('Cleanup completed successfully'))
   .catch((error) => {
     console.error('Cleanup failed:', error);

@@ -1,5 +1,5 @@
 import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, DeleteDBSubnetGroupCommand } from '@aws-sdk/client-rds';
-import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, DeleteSubnetCommand, DeleteVpcCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -146,9 +146,20 @@ async function createSecurityGroup(): Promise<SecurityGroupResult> {
   }
 }
 
+export interface ResourceTracker {
+  vpcId?: string;
+  subnetIds: string[];
+  securityGroupId?: string;
+  subnetGroupCreated: boolean;
+  clusterCreated: boolean;
+}
+
 async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Promise<string> {
-  let subnetGroupCreated = false;
-  let clusterCreated = false;
+  const resources: ResourceTracker = {
+    subnetIds: [],
+    subnetGroupCreated: false,
+    clusterCreated: false
+  };
 
   try {
     // Get the subnets for the VPC
@@ -167,7 +178,7 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
       throw new Error('Subnets must be in at least 2 different availability zones');
     }
 
-    const subnetIds = subnets.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined);
+    resources.subnetIds = subnets.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined);
     
     // Check if subnet group exists
     try {
@@ -193,10 +204,10 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
       DBSubnetGroupName: 'aurora-subnet-group',
       DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
-      SubnetIds: subnetIds,
+      SubnetIds: resources.subnetIds,
     });
     await rdsClient.send(createSubnetGroupCommand);
-    subnetGroupCreated = true;
+    resources.subnetGroupCreated = true;
 
     const createClusterCommand = new CreateDBClusterCommand({
       DBClusterIdentifier: config.clusterIdentifier,
@@ -216,7 +227,7 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     });
 
     const createClusterResponse = await rdsClient.send(createClusterCommand);
-    clusterCreated = true;
+    resources.clusterCreated = true;
     
     console.log('Waiting for cluster to become available...');
     await waitUntilDBClusterAvailable(
@@ -232,9 +243,15 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     return describeResponse.DBClusters![0].Endpoint!;
   } catch (error) {
     console.error('Error creating Aurora cluster:', error);
-    
-    // Rollback created resources
-    if (clusterCreated) {
+    await cleanupResources(resources, securityGroupResult);
+    throw error;
+  }
+}
+
+export async function cleanupResources(resources: ResourceTracker, securityGroupResult: SecurityGroupResult): Promise<void> {
+  try {
+    // Cleanup in reverse order of creation
+    if (resources.clusterCreated) {
       try {
         console.log('Rolling back: Deleting Aurora cluster...');
         const deleteClusterCommand = new DeleteDBClusterCommand({
@@ -242,44 +259,61 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
           SkipFinalSnapshot: true,
         });
         await rdsClient.send(deleteClusterCommand);
-      } catch (deleteError) {
-        console.error('Error during cluster rollback:', deleteError);
+      } catch (error) {
+        console.error('Error during cluster rollback:', error);
       }
     }
 
-    if (subnetGroupCreated) {
+    if (resources.subnetGroupCreated) {
       try {
         console.log('Rolling back: Deleting DB subnet group...');
         const deleteSubnetGroupCommand = new DeleteDBSubnetGroupCommand({
           DBSubnetGroupName: 'aurora-subnet-group'
         });
         await rdsClient.send(deleteSubnetGroupCommand);
-      } catch (deleteError) {
-        console.error('Error during subnet group rollback:', deleteError);
+      } catch (error) {
+        console.error('Error during subnet group rollback:', error);
       }
     }
 
-    throw error;
-  }
-}
+    // Delete security group
+    try {
+      console.log('Rolling back: Deleting security group...');
+      const deleteSgCommand = new DeleteSecurityGroupCommand({
+        GroupId: securityGroupResult.groupId,
+      });
+      await ec2Client.send(deleteSgCommand);
+    } catch (error) {
+      console.error('Error during security group rollback:', error);
+    }
 
-export async function cleanupResources(securityGroupResult: SecurityGroupResult): Promise<void> {
-  try {
-    console.log('Deleting Aurora cluster...');
-    const deleteClusterCommand = new DeleteDBClusterCommand({
-      DBClusterIdentifier: config.clusterIdentifier,
-      SkipFinalSnapshot: true,
-    });
-    await rdsClient.send(deleteClusterCommand);
+    // Delete subnets
+    for (const subnetId of resources.subnetIds) {
+      try {
+        console.log(`Rolling back: Deleting subnet ${subnetId}...`);
+        const deleteSubnetCommand = new DeleteSubnetCommand({
+          SubnetId: subnetId
+        });
+        await ec2Client.send(deleteSubnetCommand);
+      } catch (error) {
+        console.error(`Error during subnet ${subnetId} rollback:`, error);
+      }
+    }
 
-    console.log('Deleting security group...');
-    const deleteSgCommand = new DeleteSecurityGroupCommand({
-      GroupId: securityGroupResult.groupId,
-    });
-    await ec2Client.send(deleteSgCommand);
+    // Delete VPC if it was created
+    if (resources.vpcId) {
+      try {
+        console.log(`Rolling back: Deleting VPC ${resources.vpcId}...`);
+        const deleteVpcCommand = new DeleteVpcCommand({
+          VpcId: resources.vpcId
+        });
+        await ec2Client.send(deleteVpcCommand);
+      } catch (error) {
+        console.error('Error during VPC rollback:', error);
+      }
+    }
   } catch (error) {
-    console.error('Error during cleanup:', error);
-    throw error;
+    console.error('Error during resource cleanup:', error);
   }
 }
 
