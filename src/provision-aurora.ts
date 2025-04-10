@@ -1,4 +1,4 @@
-import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand } from '@aws-sdk/client-rds';
+import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, DeleteDBSubnetGroupCommand } from '@aws-sdk/client-rds';
 import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 
@@ -147,6 +147,9 @@ async function createSecurityGroup(): Promise<SecurityGroupResult> {
 }
 
 async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Promise<string> {
+  let subnetGroupCreated = false;
+  let clusterCreated = false;
+
   try {
     // Get the subnets for the VPC
     const describeSubnetsCommand = new DescribeSubnetsCommand({
@@ -160,6 +163,29 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     
     if (subnetIds.length < 2) {
       throw new Error('At least two subnets are required for RDS');
+    }
+
+    // Check if subnet group exists
+    try {
+      const describeSubnetGroupCommand = new DescribeDBSubnetGroupsCommand({
+        DBSubnetGroupName: 'aurora-subnet-group'
+      });
+      await rdsClient.send(describeSubnetGroupCommand);
+      console.log('DB subnet group already exists, reusing it...');
+    } catch (error) {
+      if (error instanceof Error && error.name === 'DBSubnetGroupNotFoundFault') {
+        // Create DB subnet group if it doesn't exist
+        const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
+          DBSubnetGroupName: 'aurora-subnet-group',
+          DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
+          SubnetIds: subnetIds,
+        });
+        await rdsClient.send(createSubnetGroupCommand);
+        subnetGroupCreated = true;
+        console.log('Created new DB subnet group');
+      } else {
+        throw error;
+      }
     }
 
     const createClusterCommand = new CreateDBClusterCommand({
@@ -180,15 +206,8 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
       AllocatedStorage: 10,
     });
 
-    // Create DB subnet group
-    const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
-      DBSubnetGroupName: 'aurora-subnet-group',
-      DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
-      SubnetIds: subnetIds,
-    });
-    await rdsClient.send(createSubnetGroupCommand);
-
     const createClusterResponse = await rdsClient.send(createClusterCommand);
+    clusterCreated = true;
     
     console.log('Waiting for cluster to become available...');
     await waitUntilDBClusterAvailable(
@@ -204,6 +223,33 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     return describeResponse.DBClusters![0].Endpoint!;
   } catch (error) {
     console.error('Error creating Aurora cluster:', error);
+    
+    // Rollback created resources
+    if (clusterCreated) {
+      try {
+        console.log('Rolling back: Deleting Aurora cluster...');
+        const deleteClusterCommand = new DeleteDBClusterCommand({
+          DBClusterIdentifier: config.clusterIdentifier,
+          SkipFinalSnapshot: true,
+        });
+        await rdsClient.send(deleteClusterCommand);
+      } catch (deleteError) {
+        console.error('Error during cluster rollback:', deleteError);
+      }
+    }
+
+    if (subnetGroupCreated) {
+      try {
+        console.log('Rolling back: Deleting DB subnet group...');
+        const deleteSubnetGroupCommand = new DeleteDBSubnetGroupCommand({
+          DBSubnetGroupName: 'aurora-subnet-group'
+        });
+        await rdsClient.send(deleteSubnetGroupCommand);
+      } catch (deleteError) {
+        console.error('Error during subnet group rollback:', deleteError);
+      }
+    }
+
     throw error;
   }
 }
