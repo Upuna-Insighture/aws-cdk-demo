@@ -22,6 +22,11 @@ const config: AuroraConfig = {
 const rdsClient = new RDSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'us-east-1' });
 
+interface SecurityGroupResult {
+  groupId: string;
+  vpcId: string;
+}
+
 async function createVpc(): Promise<string> {
   try {
     const createVpcCommand = new CreateVpcCommand({
@@ -108,7 +113,7 @@ async function getDefaultVpcId(): Promise<string> {
   }
 }
 
-async function createSecurityGroup(): Promise<string> {
+async function createSecurityGroup(): Promise<SecurityGroupResult> {
   try {
     const vpcId = await getDefaultVpcId();
     const createSgCommand = new CreateSecurityGroupCommand({
@@ -131,20 +136,22 @@ async function createSecurityGroup(): Promise<string> {
     });
     await ec2Client.send(authorizeIngressCommand);
     
-    return createSgResponse.GroupId!;
+    return {
+      groupId: createSgResponse.GroupId!,
+      vpcId: vpcId
+    };
   } catch (error) {
     console.error('Error creating security group:', error);
     throw error;
   }
 }
 
-async function createAuroraCluster(securityGroupId: string): Promise<string> {
+async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Promise<string> {
   try {
-    // Get the VPC ID and its subnets
-    const vpcId = await getDefaultVpcId();
+    // Get the subnets for the VPC
     const describeSubnetsCommand = new DescribeSubnetsCommand({
       Filters: [
-        { Name: 'vpc-id', Values: [vpcId] },
+        { Name: 'vpc-id', Values: [securityGroupResult.vpcId] },
         { Name: 'tag:Name', Values: ['aurora-subnet-*'] }
       ]
     });
@@ -163,7 +170,7 @@ async function createAuroraCluster(securityGroupId: string): Promise<string> {
       DatabaseName: config.databaseName,
       MasterUsername: config.masterUsername,
       MasterUserPassword: config.masterUserPassword,
-      VpcSecurityGroupIds: [securityGroupId],
+      VpcSecurityGroupIds: [securityGroupResult.groupId],
       DBSubnetGroupName: 'aurora-subnet-group',
       ServerlessV2ScalingConfiguration: {
         MinCapacity: 0.5,
@@ -201,7 +208,7 @@ async function createAuroraCluster(securityGroupId: string): Promise<string> {
   }
 }
 
-export async function cleanupResources(securityGroupId: string): Promise<void> {
+export async function cleanupResources(securityGroupResult: SecurityGroupResult): Promise<void> {
   try {
     console.log('Deleting Aurora cluster...');
     const deleteClusterCommand = new DeleteDBClusterCommand({
@@ -212,7 +219,7 @@ export async function cleanupResources(securityGroupId: string): Promise<void> {
 
     console.log('Deleting security group...');
     const deleteSgCommand = new DeleteSecurityGroupCommand({
-      GroupId: securityGroupId,
+      GroupId: securityGroupResult.groupId,
     });
     await ec2Client.send(deleteSgCommand);
   } catch (error) {
@@ -224,10 +231,10 @@ export async function cleanupResources(securityGroupId: string): Promise<void> {
 async function main() {
   try {
     console.log('Creating security group...');
-    const securityGroupId = await createSecurityGroup();
+    const securityGroupResult = await createSecurityGroup();
     
     console.log('Creating Aurora Serverless V2 cluster...');
-    const endpoint = await createAuroraCluster(securityGroupId);
+    const endpoint = await createAuroraCluster(securityGroupResult);
     
     console.log('\nAurora Serverless V2 Cluster created successfully!');
     console.log('Cluster Endpoint:', endpoint);
@@ -236,7 +243,7 @@ async function main() {
     console.log('\nWARNING: Store these credentials securely!');
     
     console.log('\nTo clean up resources, run:');
-    console.log(`npm run cleanup ${securityGroupId}`);
+    console.log(`npm run cleanup ${securityGroupResult.groupId}`);
   } catch (error) {
     console.error('Error in main process:', error);
     process.exit(1);
