@@ -1,5 +1,5 @@
-import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable } from '@aws-sdk/client-rds';
-import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand } from '@aws-sdk/client-ec2';
+import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand } from '@aws-sdk/client-rds';
+import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -35,14 +35,25 @@ async function createVpc(): Promise<string> {
     const vpcId = vpcResponse.Vpc?.VpcId;
     if (!vpcId) throw new Error('Failed to create VPC');
 
-    const createSubnetCommand = new CreateSubnetCommand({
-      VpcId: vpcId,
-      CidrBlock: '10.0.1.0/24',
-      AvailabilityZone: `${process.env.AWS_REGION || 'us-east-1'}a`
-    });
-    const subnetResponse = await ec2Client.send(createSubnetCommand);
-    const subnetId = subnetResponse.Subnet?.SubnetId;
-    if (!subnetId) throw new Error('Failed to create subnet');
+    // Create subnets in different availability zones
+    const availabilityZones = ['a', 'b'];
+    const subnetIds: string[] = [];
+
+    for (let i = 0; i < availabilityZones.length; i++) {
+      const createSubnetCommand = new CreateSubnetCommand({
+        VpcId: vpcId,
+        CidrBlock: `10.0.${i + 1}.0/24`,
+        AvailabilityZone: `${process.env.AWS_REGION || 'us-east-1'}${availabilityZones[i]}`,
+        TagSpecifications: [{
+          ResourceType: 'subnet',
+          Tags: [{ Key: 'Name', Value: `aurora-subnet-${availabilityZones[i]}` }]
+        }]
+      });
+      const subnetResponse = await ec2Client.send(createSubnetCommand);
+      const subnetId = subnetResponse.Subnet?.SubnetId;
+      if (!subnetId) throw new Error('Failed to create subnet');
+      subnetIds.push(subnetId);
+    }
 
     const createIgwCommand = new CreateInternetGatewayCommand({});
     const igwResponse = await ec2Client.send(createIgwCommand);
@@ -65,10 +76,13 @@ async function createVpc(): Promise<string> {
       GatewayId: igwId
     }));
 
-    await ec2Client.send(new AssociateRouteTableCommand({
-      SubnetId: subnetId,
-      RouteTableId: routeTableId
-    }));
+    // Associate route table with all subnets
+    for (const subnetId of subnetIds) {
+      await ec2Client.send(new AssociateRouteTableCommand({
+        SubnetId: subnetId,
+        RouteTableId: routeTableId
+      }));
+    }
 
     return vpcId;
   } catch (error) {
@@ -126,6 +140,21 @@ async function createSecurityGroup(): Promise<string> {
 
 async function createAuroraCluster(securityGroupId: string): Promise<string> {
   try {
+    // Get the VPC ID and its subnets
+    const vpcId = await getDefaultVpcId();
+    const describeSubnetsCommand = new DescribeSubnetsCommand({
+      Filters: [
+        { Name: 'vpc-id', Values: [vpcId] },
+        { Name: 'tag:Name', Values: ['aurora-subnet-*'] }
+      ]
+    });
+    const subnetsResponse = await ec2Client.send(describeSubnetsCommand);
+    const subnetIds = subnetsResponse.Subnets?.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined) || [];
+    
+    if (subnetIds.length < 2) {
+      throw new Error('At least two subnets are required for RDS');
+    }
+
     const createClusterCommand = new CreateDBClusterCommand({
       DBClusterIdentifier: config.clusterIdentifier,
       Engine: 'aurora-postgresql',
@@ -135,6 +164,7 @@ async function createAuroraCluster(securityGroupId: string): Promise<string> {
       MasterUsername: config.masterUsername,
       MasterUserPassword: config.masterUserPassword,
       VpcSecurityGroupIds: [securityGroupId],
+      DBSubnetGroupName: 'aurora-subnet-group',
       ServerlessV2ScalingConfiguration: {
         MinCapacity: 0.5,
         MaxCapacity: 1,
@@ -142,6 +172,14 @@ async function createAuroraCluster(securityGroupId: string): Promise<string> {
       StorageType: 'aurora',
       AllocatedStorage: 10,
     });
+
+    // Create DB subnet group
+    const createSubnetGroupCommand = new CreateDBSubnetGroupCommand({
+      DBSubnetGroupName: 'aurora-subnet-group',
+      DBSubnetGroupDescription: 'Subnet group for Aurora Serverless V2',
+      SubnetIds: subnetIds,
+    });
+    await rdsClient.send(createSubnetGroupCommand);
 
     const createClusterResponse = await rdsClient.send(createClusterCommand);
     
