@@ -1,6 +1,7 @@
-import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, DeleteDBSubnetGroupCommand } from '@aws-sdk/client-rds';
+import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, DeleteDBSubnetGroupCommand, CreateDBInstanceCommand, DescribeDBInstancesCommand, DeleteDBInstanceCommand } from '@aws-sdk/client-rds';
 import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, DeleteSubnetCommand, DeleteVpcCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
+import { setTimeout } from 'timers/promises';
 
 dotenv.config();
 
@@ -9,6 +10,7 @@ interface AuroraConfig {
   masterUsername: string;
   masterUserPassword: string;
   databaseName: string;
+  instanceIdentifier: string;
   vpcSecurityGroupId?: string;
 }
 
@@ -17,6 +19,7 @@ const config: AuroraConfig = {
   masterUsername: process.env.DB_MASTER_USERNAME || 'admin',
   masterUserPassword: process.env.DB_MASTER_PASSWORD || 'ChangeThisPassword123!',
   databaseName: process.env.DB_NAME || 'auroradb',
+  instanceIdentifier: process.env.DB_INSTANCE_IDENTIFIER || 'aurora-serverless-instance-1',
 };
 
 const rdsClient = new RDSClient({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -25,6 +28,15 @@ const ec2Client = new EC2Client({ region: process.env.AWS_REGION || 'us-east-1' 
 interface SecurityGroupResult {
   groupId: string;
   vpcId: string;
+}
+
+export interface ResourceTracker {
+  vpcId?: string;
+  subnetIds: string[];
+  securityGroupId?: string;
+  subnetGroupCreated: boolean;
+  clusterCreated: boolean;
+  instanceCreated: boolean;
 }
 
 async function createVpc(): Promise<string> {
@@ -41,7 +53,7 @@ async function createVpc(): Promise<string> {
     if (!vpcId) throw new Error('Failed to create VPC');
 
     // Create subnets in different availability zones
-    const availabilityZones = ['a', 'b'];
+    const availabilityZones = ['a', 'b', 'c'].slice(0, 2); // Use 2 AZs
     const subnetIds: string[] = [];
 
     for (let i = 0; i < availabilityZones.length; i++) {
@@ -123,6 +135,10 @@ async function createSecurityGroup(): Promise<SecurityGroupResult> {
     });
     const createSgResponse = await ec2Client.send(createSgCommand);
     
+    if (!createSgResponse.GroupId) {
+      throw new Error('Failed to create security group');
+    }
+
     const authorizeIngressCommand = new AuthorizeSecurityGroupIngressCommand({
       GroupId: createSgResponse.GroupId,
       IpPermissions: [
@@ -137,7 +153,7 @@ async function createSecurityGroup(): Promise<SecurityGroupResult> {
     await ec2Client.send(authorizeIngressCommand);
     
     return {
-      groupId: createSgResponse.GroupId!,
+      groupId: createSgResponse.GroupId,
       vpcId: vpcId
     };
   } catch (error) {
@@ -146,19 +162,86 @@ async function createSecurityGroup(): Promise<SecurityGroupResult> {
   }
 }
 
-export interface ResourceTracker {
-  vpcId?: string;
-  subnetIds: string[];
-  securityGroupId?: string;
-  subnetGroupCreated: boolean;
-  clusterCreated: boolean;
+async function waitForClusterAvailable(clusterIdentifier: string): Promise<void> {
+  const maxAttempts = 60; // 30 minutes (30 * 1 minute)
+  let attempts = 0;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      const describeCommand = new DescribeDBClustersCommand({
+        DBClusterIdentifier: clusterIdentifier,
+      });
+      const response = await rdsClient.send(describeCommand);
+      const cluster = response.DBClusters?.[0];
+      
+      if (!cluster) {
+        throw new Error('Cluster not found');
+      }
+
+      if (cluster.Status === 'available') {
+        console.log('Cluster is available');
+        return;
+      }
+      
+      if (cluster.Status === 'failed' || cluster.Status === 'deleting') {
+        throw new Error(`Cluster creation failed with status: ${cluster.Status}`);
+      }
+      
+      console.log(`Cluster status: ${cluster.Status}, waiting...`);
+      await setTimeout(30000); // 30 seconds
+    } catch (error) {
+      console.error('Error checking cluster status:', error);
+      throw error;
+    }
+  }
+  
+  throw new Error('Cluster did not become available within the expected time');
+}
+
+async function waitForInstanceAvailable(instanceIdentifier: string): Promise<void> {
+  const maxAttempts = 60; // 30 minutes (30 * 1 minute)
+  let attempts = 0;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      const describeCommand = new DescribeDBInstancesCommand({
+        DBInstanceIdentifier: instanceIdentifier,
+      });
+      const response = await rdsClient.send(describeCommand);
+      const instance = response.DBInstances?.[0];
+      
+      if (!instance) {
+        throw new Error('Instance not found');
+      }
+
+      if (instance.DBInstanceStatus === 'available') {
+        console.log('Instance is available');
+        return;
+      }
+      
+      if (instance.DBInstanceStatus === 'failed' || instance.DBInstanceStatus === 'deleting') {
+        throw new Error(`Instance creation failed with status: ${instance.DBInstanceStatus}`);
+      }
+      
+      console.log(`Instance status: ${instance.DBInstanceStatus}, waiting...`);
+      await setTimeout(30000); // 30 seconds
+    } catch (error) {
+      console.error('Error checking instance status:', error);
+      throw error;
+    }
+  }
+  
+  throw new Error('Instance did not become available within the expected time');
 }
 
 async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Promise<string> {
   const resources: ResourceTracker = {
     subnetIds: [],
     subnetGroupCreated: false,
-    clusterCreated: false
+    clusterCreated: false,
+    instanceCreated: false
   };
 
   try {
@@ -175,7 +258,7 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     // Verify AZ coverage
     const azs = new Set(subnets.map(subnet => subnet.AvailabilityZone));
     if (azs.size < 2) {
-      throw new Error('Subnets must be in at least 2 different availability zones');
+      throw new Error(`Subnets must be in at least 2 different availability zones. Found only ${azs.size} AZ(s)`);
     }
 
     resources.subnetIds = subnets.map(subnet => subnet.SubnetId).filter((id): id is string => id !== undefined);
@@ -209,6 +292,8 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
     await rdsClient.send(createSubnetGroupCommand);
     resources.subnetGroupCreated = true;
 
+    // Create the cluster
+    console.log('Creating Aurora Serverless V2 cluster...');
     const createClusterCommand = new CreateDBClusterCommand({
       DBClusterIdentifier: config.clusterIdentifier,
       Engine: 'aurora-postgresql',
@@ -224,23 +309,48 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
         MaxCapacity: 1,
       },
       StorageType: 'aurora',
+      Tags: [
+        { Key: 'Name', Value: config.clusterIdentifier },
+        { Key: 'Environment', Value: 'Development' }
+      ],
     });
 
-    const createClusterResponse = await rdsClient.send(createClusterCommand);
+    await rdsClient.send(createClusterCommand);
     resources.clusterCreated = true;
     
     console.log('Waiting for cluster to become available...');
-    await waitUntilDBClusterAvailable(
-      { client: rdsClient, maxWaitTime: 1800 },
-      { DBClusterIdentifier: config.clusterIdentifier }
-    );
+    await waitForClusterAvailable(config.clusterIdentifier);
 
+    // Create a database instance in the cluster
+    console.log('Creating database instance...');
+    const createInstanceCommand = new CreateDBInstanceCommand({
+      DBInstanceIdentifier: config.instanceIdentifier,
+      DBInstanceClass: 'db.serverless',
+      Engine: 'aurora-postgresql',
+      DBClusterIdentifier: config.clusterIdentifier,
+      PubliclyAccessible: true,
+      Tags: [
+        { Key: 'Name', Value: `${config.clusterIdentifier}-instance` },
+        { Key: 'Environment', Value: 'Development' }
+      ],
+    });
+    await rdsClient.send(createInstanceCommand);
+    resources.instanceCreated = true;
+
+    console.log('Waiting for instance to become available...');
+    await waitForInstanceAvailable(config.instanceIdentifier);
+
+    // Get the cluster endpoint
     const describeCommand = new DescribeDBClustersCommand({
       DBClusterIdentifier: config.clusterIdentifier,
     });
     const describeResponse = await rdsClient.send(describeCommand);
     
-    return describeResponse.DBClusters![0].Endpoint!;
+    if (!describeResponse.DBClusters?.[0]?.Endpoint) {
+      throw new Error('Cluster endpoint not available');
+    }
+    
+    return describeResponse.DBClusters[0].Endpoint;
   } catch (error) {
     console.error('Error creating Aurora cluster:', error);
     await cleanupResources(resources, securityGroupResult);
@@ -248,68 +358,83 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
   }
 }
 
-export async function cleanupResources(resources: ResourceTracker, securityGroupResult: SecurityGroupResult): Promise<void> {
+async function cleanupResources(resources: ResourceTracker, securityGroupResult: SecurityGroupResult): Promise<void> {
   try {
     // Cleanup in reverse order of creation
+    if (resources.instanceCreated) {
+      try {
+        console.log('Deleting database instance...');
+        const deleteInstanceCommand = new DeleteDBInstanceCommand({
+          DBInstanceIdentifier: config.instanceIdentifier,
+          SkipFinalSnapshot: true,
+        });
+        await rdsClient.send(deleteInstanceCommand);
+      } catch (error) {
+        console.error('Error during instance deletion:', error);
+      }
+    }
+
     if (resources.clusterCreated) {
       try {
-        console.log('Rolling back: Deleting Aurora cluster...');
+        console.log('Deleting Aurora cluster...');
         const deleteClusterCommand = new DeleteDBClusterCommand({
           DBClusterIdentifier: config.clusterIdentifier,
           SkipFinalSnapshot: true,
         });
         await rdsClient.send(deleteClusterCommand);
       } catch (error) {
-        console.error('Error during cluster rollback:', error);
+        console.error('Error during cluster deletion:', error);
       }
     }
 
     if (resources.subnetGroupCreated) {
       try {
-        console.log('Rolling back: Deleting DB subnet group...');
+        console.log('Deleting DB subnet group...');
         const deleteSubnetGroupCommand = new DeleteDBSubnetGroupCommand({
           DBSubnetGroupName: 'aurora-subnet-group'
         });
         await rdsClient.send(deleteSubnetGroupCommand);
       } catch (error) {
-        console.error('Error during subnet group rollback:', error);
+        console.error('Error during subnet group deletion:', error);
       }
     }
 
     // Delete security group
-    try {
-      console.log('Rolling back: Deleting security group...');
-      const deleteSgCommand = new DeleteSecurityGroupCommand({
-        GroupId: securityGroupResult.groupId,
-      });
-      await ec2Client.send(deleteSgCommand);
-    } catch (error) {
-      console.error('Error during security group rollback:', error);
+    if (securityGroupResult.groupId) {
+      try {
+        console.log('Deleting security group...');
+        const deleteSgCommand = new DeleteSecurityGroupCommand({
+          GroupId: securityGroupResult.groupId,
+        });
+        await ec2Client.send(deleteSgCommand);
+      } catch (error) {
+        console.error('Error during security group deletion:', error);
+      }
     }
 
     // Delete subnets
     for (const subnetId of resources.subnetIds) {
       try {
-        console.log(`Rolling back: Deleting subnet ${subnetId}...`);
+        console.log(`Deleting subnet ${subnetId}...`);
         const deleteSubnetCommand = new DeleteSubnetCommand({
           SubnetId: subnetId
         });
         await ec2Client.send(deleteSubnetCommand);
       } catch (error) {
-        console.error(`Error during subnet ${subnetId} rollback:`, error);
+        console.error(`Error during subnet ${subnetId} deletion:`, error);
       }
     }
 
     // Delete VPC if it was created
     if (resources.vpcId) {
       try {
-        console.log(`Rolling back: Deleting VPC ${resources.vpcId}...`);
+        console.log(`Deleting VPC ${resources.vpcId}...`);
         const deleteVpcCommand = new DeleteVpcCommand({
           VpcId: resources.vpcId
         });
         await ec2Client.send(deleteVpcCommand);
       } catch (error) {
-        console.error('Error during VPC rollback:', error);
+        console.error('Error during VPC deletion:', error);
       }
     }
   } catch (error) {
@@ -329,6 +454,7 @@ async function main() {
     console.log('Cluster Endpoint:', endpoint);
     console.log('Master Username:', config.masterUsername);
     console.log('Database Name:', config.databaseName);
+    console.log('Instance Identifier:', config.instanceIdentifier);
     console.log('\nWARNING: Store these credentials securely!');
     
     console.log('\nTo clean up resources, run:');
@@ -341,4 +467,6 @@ async function main() {
 
 if (require.main === module) {
   main();
-} 
+}
+
+export { createAuroraCluster, cleanupResources };
