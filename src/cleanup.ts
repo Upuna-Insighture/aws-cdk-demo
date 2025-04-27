@@ -14,7 +14,9 @@ const securityGroupResult = {
 const resources: ResourceTracker = {
   subnetIds: [],
   subnetGroupCreated: true,
-  clusterCreated: true
+  clusterCreated: true,
+  instanceCreated: true, // Added this missing property
+  securityGroupId: securityGroupId // Also added this if you want to track it
 };
 
 cleanupResources(resources, securityGroupResult)
@@ -22,4 +24,4 @@ cleanupResources(resources, securityGroupResult)
   .catch((error) => {
     console.error('Cleanup failed:', error);
     process.exit(1);
-  }); 
+  });
