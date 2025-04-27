@@ -1,5 +1,36 @@
-import { RDSClient, CreateDBClusterCommand, DeleteDBClusterCommand, DescribeDBClustersCommand, waitUntilDBClusterAvailable, CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, DeleteDBSubnetGroupCommand, CreateDBInstanceCommand, DescribeDBInstancesCommand, DeleteDBInstanceCommand } from '@aws-sdk/client-rds';
-import { EC2Client, CreateSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, DeleteSecurityGroupCommand, DescribeVpcsCommand, CreateVpcCommand, CreateSubnetCommand, DeleteSubnetCommand, DeleteVpcCommand, CreateInternetGatewayCommand, AttachInternetGatewayCommand, CreateRouteTableCommand, CreateRouteCommand, AssociateRouteTableCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
+import { 
+  RDSClient, 
+  CreateDBClusterCommand, 
+  DeleteDBClusterCommand, 
+  DescribeDBClustersCommand, 
+  waitUntilDBClusterAvailable,
+  waitUntilDBClusterDeleted,
+  CreateDBSubnetGroupCommand, 
+  DescribeDBSubnetGroupsCommand, 
+  DeleteDBSubnetGroupCommand, 
+  CreateDBInstanceCommand,
+  DescribeDBInstancesCommand,
+  DeleteDBInstanceCommand,
+  waitUntilDBInstanceDeleted
+} from '@aws-sdk/client-rds';
+import { 
+  EC2Client, 
+  CreateSecurityGroupCommand, 
+  AuthorizeSecurityGroupIngressCommand, 
+  DeleteSecurityGroupCommand, 
+  DescribeVpcsCommand, 
+  CreateVpcCommand, 
+  CreateSubnetCommand, 
+  DeleteSubnetCommand, 
+  DeleteVpcCommand, 
+  CreateInternetGatewayCommand, 
+  AttachInternetGatewayCommand, 
+  CreateRouteTableCommand, 
+  CreateRouteCommand, 
+  AssociateRouteTableCommand, 
+  DescribeSubnetsCommand,
+  ModifyVpcAttributeCommand
+} from '@aws-sdk/client-ec2';
 import dotenv from 'dotenv';
 import { setTimeout } from 'timers/promises';
 
@@ -51,6 +82,17 @@ async function createVpc(): Promise<string> {
     const vpcResponse = await ec2Client.send(createVpcCommand);
     const vpcId = vpcResponse.Vpc?.VpcId;
     if (!vpcId) throw new Error('Failed to create VPC');
+
+    // Enable DNS support and hostnames for the VPC
+    await ec2Client.send(new ModifyVpcAttributeCommand({
+      VpcId: vpcId,
+      EnableDnsSupport: { Value: true }
+    }));
+    
+    await ec2Client.send(new ModifyVpcAttributeCommand({
+      VpcId: vpcId,
+      EnableDnsHostnames: { Value: true }
+    }));
 
     // Create subnets in different availability zones
     const availabilityZones = ['a', 'b', 'c'].slice(0, 2); // Use 2 AZs
@@ -115,6 +157,15 @@ async function getDefaultVpcId(): Promise<string> {
     });
     const response = await ec2Client.send(describeVpcsCommand);
     if (response.Vpcs?.[0]?.VpcId) {
+      // Enable DNS for default VPC if needed
+      await ec2Client.send(new ModifyVpcAttributeCommand({
+        VpcId: response.Vpcs[0].VpcId,
+        EnableDnsSupport: { Value: true }
+      }));
+      await ec2Client.send(new ModifyVpcAttributeCommand({
+        VpcId: response.Vpcs[0].VpcId,
+        EnableDnsHostnames: { Value: true }
+      }));
       return response.Vpcs[0].VpcId;
     }
     console.log('No default VPC found, creating a new one...');
@@ -328,7 +379,7 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
       DBInstanceClass: 'db.serverless',
       Engine: 'aurora-postgresql',
       DBClusterIdentifier: config.clusterIdentifier,
-      PubliclyAccessible: true,
+      PubliclyAccessible: false, // Changed to false or ensure VPC is properly configured
       Tags: [
         { Key: 'Name', Value: `${config.clusterIdentifier}-instance` },
         { Key: 'Environment', Value: 'Development' }
@@ -360,7 +411,7 @@ async function createAuroraCluster(securityGroupResult: SecurityGroupResult): Pr
 
 async function cleanupResources(resources: ResourceTracker, securityGroupResult: SecurityGroupResult): Promise<void> {
   try {
-    // Cleanup in reverse order of creation
+    // Cleanup in reverse order of creation with proper waiting
     if (resources.instanceCreated) {
       try {
         console.log('Deleting database instance...');
@@ -369,6 +420,10 @@ async function cleanupResources(resources: ResourceTracker, securityGroupResult:
           SkipFinalSnapshot: true,
         });
         await rdsClient.send(deleteInstanceCommand);
+        await waitUntilDBInstanceDeleted(
+          { client: rdsClient, maxWaitTime: 600 },
+          { DBInstanceIdentifier: config.instanceIdentifier }
+        );
       } catch (error) {
         console.error('Error during instance deletion:', error);
       }
@@ -382,6 +437,10 @@ async function cleanupResources(resources: ResourceTracker, securityGroupResult:
           SkipFinalSnapshot: true,
         });
         await rdsClient.send(deleteClusterCommand);
+        await waitUntilDBClusterDeleted(
+          { client: rdsClient, maxWaitTime: 600 },
+          { DBClusterIdentifier: config.clusterIdentifier }
+        );
       } catch (error) {
         console.error('Error during cluster deletion:', error);
       }
